@@ -72,14 +72,21 @@ export const normalizeReqPath = (api: IApi, reqPath: string) => {
   };
 };
 
+// mfsu 功能入口
 export default function (api: IApi) {
+  //获取webpack 别名
   const webpackAlias = {};
+  //获取webpack External 配置
   const webpackExternals: any[] = [];
   let publicPath = '/';
+  // 依赖信息
   let depInfo: DepInfo;
+  // 依赖编译类
   let depBuilder: DepBuilder;
+  //当前模式
   let mode: TMode = 'development';
 
+  // umi 插件注册钩子。不用管
   api.onPluginReady({
     fn() {
       const command = process.argv[2];
@@ -90,9 +97,12 @@ export default function (api: IApi) {
     stage: 2,
   });
 
+  // 在命令注册函数执行前触发。可以使用 config 和 paths。
   api.onStart(async ({ name, args }) => {
+    // 检查mfsu 配置是否正确 没什么好说的
     checkConfig(api);
 
+    // 根据当前命令改模式。没什么好讲的
     if (name === 'build') {
       mode = 'production';
       // @ts-ignore
@@ -108,11 +118,17 @@ export default function (api: IApi) {
 
     debug(`mode: ${mode}`);
 
+    // 根据模式取缓存存放文件
     const tmpDir = getMfsuPath(api, { mode });
     debug(`tmpDir: ${tmpDir}`);
+
+    // 不存在创建
     if (!existsSync(tmpDir)) {
       mkdirp.sync(tmpDir);
     }
+
+    // 获取 依赖信息
+    // 操作缓存相关
     depInfo = new DepInfo({
       tmpDir,
       mode,
@@ -121,7 +137,11 @@ export default function (api: IApi) {
       webpackAlias,
     });
     debug('load cache');
+    // 加载缓存
     depInfo.loadCache();
+
+    // 获取依赖编译对象
+    // 打依赖信息生成依赖文件的地方
     depBuilder = new DepBuilder({
       tmpDir,
       mode,
@@ -129,6 +149,8 @@ export default function (api: IApi) {
     });
   });
 
+  // 修改 umi 配置
+  // 如果启用umi 。则将umi chunks 修改为 mfsu内部配置的
   api.modifyConfig({
     fn(memo) {
       return {
@@ -145,17 +167,20 @@ export default function (api: IApi) {
     stage: Infinity,
   });
 
+  // 构建完成 开始编译依赖
   api.onBuildComplete(async ({ err }) => {
     if (err) return;
     debug(`build deps in production`);
     await buildDeps();
   });
 
+  // 开发模式下 编译完成 同步编译依赖
   api.onDevCompileDone(async () => {
     debug(`build deps in development`);
     await buildDeps();
   });
 
+  // 描述 mfsu 配置信息
   api.describe({
     key: 'mfsu',
     config: {
@@ -185,13 +210,17 @@ export default function (api: IApi) {
     },
   });
 
+  // 修改 @umijs/babel-preset-umi 的配置项。
   api.modifyBabelPresetOpts({
     fn: (opts, args) => {
       return {
         ...opts,
+        // 部分插件会开启 @babel/import-plugin，但是会影响 mfsu 模式的使用，在此强制关闭
         ...(args.mfsu
           ? {}
           : {
+              // 顶部await 插件
+              // 见 babel-plugin-import-to-await-require 包
               importToAwaitRequire: {
                 remoteName:
                   (api.config.mfsu && api.config.mfsu.mfName) ||
@@ -204,6 +233,8 @@ export default function (api: IApi) {
                 },
                 // @ts-ignore
                 exportAllMembers: api.config.mfsu?.exportAllMembers,
+
+                // 转换依赖
                 onTransformDeps(opts: {
                   file: string;
                   source: string;
@@ -228,6 +259,7 @@ export default function (api: IApi) {
                     );
                   }
                   // collect dependencies
+                  // 收集依赖
                   if (opts.isMatch) {
                     depInfo.addTmpDep(opts.source, file);
                   }
@@ -239,6 +271,7 @@ export default function (api: IApi) {
     stage: Infinity,
   });
 
+  // 修改 babel 配置
   api.modifyBabelOpts({
     fn: async (opts) => {
       webpackAlias['core-js'] = dirname(
@@ -248,6 +281,7 @@ export default function (api: IApi) {
         'regenerator-runtime/runtime',
       );
 
+      // 看哪些包 需要走 babel-import-redirect-plugin 转一下
       // @ts-ignore
       const umiRedirect = await getUmiRedirect(process.env.UMI_DIR);
 
@@ -275,11 +309,13 @@ export default function (api: IApi) {
     stage: Infinity,
   });
 
+  //添加在 webpack compiler 中间件之前的中间件，返回值格式为 express 中间件
   api.addBeforeMiddlewares(() => {
     return (req, res, next) => {
       const path = req.path;
       const { isMfAssets, fileRelativePath } = normalizeReqPath(api, req.path);
       if (isMfAssets) {
+        // 把预编译的资源吐出来
         depBuilder.onBuildComplete(() => {
           const mfsuPath = getMfsuPath(api, { mode: 'development' });
           const content = readFileSync(
@@ -299,7 +335,7 @@ export default function (api: IApi) {
     };
   });
 
-  // 修改 webpack 配置
+  // 修改 bundle 配置。
   api.register({
     key: 'modifyBundleConfig',
     fn(memo: any, { type, mfsu }: { mfsu: boolean; type: BundlerConfigType }) {
@@ -312,6 +348,7 @@ export default function (api: IApi) {
         publicPath = memo.output.publicPath;
 
         if (!mfsu) {
+          // 提供给其他应用共享的依赖
           const mfName =
             (api.config.mfsu && api.config.mfsu.mfName) || DEFAULT_MF_NAME;
           memo.plugins.push(
@@ -348,6 +385,7 @@ export default function (api: IApi) {
     stage: Infinity,
   });
 
+  // 编译完成 开始编译依赖
   async function buildDeps(opts: { force?: boolean } = {}) {
     const { shouldBuild } = depInfo.loadTmpDeps();
     debug(`shouldBuild: ${shouldBuild}, force: ${opts.force}`);
@@ -355,6 +393,7 @@ export default function (api: IApi) {
       await depBuilder.build({
         deps: depInfo.data.deps,
         webpackAlias,
+        // 编译完成之后写缓存。通知客户端刷新
         onBuildComplete(err: any, stats: any) {
           debug(`build complete with err ${err}`);
           if (err || stats.hasErrors()) {
@@ -372,6 +411,7 @@ export default function (api: IApi) {
       });
     }
 
+    // 讲缓存写到输出文件内
     if (mode === 'production') {
       // production 模式，build 完后将产物移动到 dist 中
       debug(`copy mf output files to dist`);
@@ -382,6 +422,7 @@ export default function (api: IApi) {
     }
   }
 
+  // 注册命令
   // npx umi mfsu build
   // npx umi mfsu build --mode production
   // npx umi mfsu build --mode development --force

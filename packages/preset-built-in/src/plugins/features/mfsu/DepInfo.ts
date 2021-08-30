@@ -68,6 +68,7 @@ export default class DepInfo {
     };
   }
 
+  // 加载缓存
   loadCache() {
     const path = this.cachePath;
     try {
